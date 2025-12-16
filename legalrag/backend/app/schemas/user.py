@@ -20,7 +20,7 @@ class TokenData(BaseModel):
     """Datos decodificados del token."""
     user_id: int
     email: str
-    role: UserRole
+    role: str  # String para evitar problemas de validación con enum
     despacho_id: Optional[int] = None
 
 

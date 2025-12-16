@@ -92,10 +92,10 @@ async def login(
     user.last_login = datetime.utcnow()
     await db.commit()
 
-    # Generar token
+    # Generar token (sub debe ser string según JWT spec)
     access_token = create_access_token(
         data={
-            "sub": user.id,
+            "sub": str(user.id),
             "email": user.email,
             "role": user.role.value,
             "despacho_id": user.despacho_id
@@ -193,7 +193,7 @@ async def refresh_token(
     """
     access_token = create_access_token(
         data={
-            "sub": current_user.id,
+            "sub": str(current_user.id),
             "email": current_user.email,
             "role": current_user.role.value,
             "despacho_id": current_user.despacho_id

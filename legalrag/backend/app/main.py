@@ -34,11 +34,14 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("✅ Base de datos inicializada")
 
-    # Inicializar Qdrant
-    from app.services.rag_service import RAGService
-    rag_service = RAGService()
-    await rag_service.init_collection()
-    logger.info("✅ Colección Qdrant inicializada")
+    # Inicializar Qdrant (opcional - puede fallar si no está disponible)
+    try:
+        from app.services.rag_service import RAGService
+        rag_service = RAGService()
+        await rag_service.init_collection()
+        logger.info("✅ Colección Qdrant inicializada")
+    except Exception as e:
+        logger.warning(f"⚠️ Qdrant no disponible: {e}. Continuando sin RAG.")
 
     yield
 

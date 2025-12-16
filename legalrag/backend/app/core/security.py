@@ -48,19 +48,29 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 def decode_token(token: str) -> Optional[TokenData]:
     """Decodifica y valida token JWT."""
+    import logging
+    logger = logging.getLogger(__name__)
     try:
         payload = jwt.decode(
             token,
             settings.jwt_secret_key,
             algorithms=[settings.jwt_algorithm]
         )
+        logger.debug(f"Token payload: {payload}")
+        # sub es string en JWT, convertir a int
+        sub = payload.get("sub")
+        user_id = int(sub) if sub else None
         return TokenData(
-            user_id=payload.get("sub"),
+            user_id=user_id,
             email=payload.get("email"),
             role=payload.get("role"),
             despacho_id=payload.get("despacho_id")
         )
-    except JWTError:
+    except JWTError as e:
+        logger.error(f"JWT decode error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Token validation error: {type(e).__name__}: {e}")
         return None
 
 

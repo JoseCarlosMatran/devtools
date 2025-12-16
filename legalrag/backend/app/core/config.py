@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     api_prefix: str = "/api/v1"
 
-    # Base de datos
-    database_url: str = "postgresql+asyncpg://legalrag:legalrag_secret@localhost:5432/legalrag_db"
+    # Base de datos (SQLite por defecto para desarrollo sin Docker)
+    database_url: str = "sqlite+aiosqlite:///./data/legalrag.db"
 
     # Qdrant
     qdrant_host: str = "localhost"

@@ -25,13 +25,22 @@ class Base(DeclarativeBase):
 
 
 # Motor async de SQLAlchemy
-engine = create_async_engine(
-    settings.database_url,
-    echo=settings.debug,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20
-)
+# SQLite no soporta pool_size, así que ajustamos según el tipo de DB
+_is_sqlite = settings.database_url.startswith("sqlite")
+_engine_args = {
+    "echo": settings.debug,
+}
+if not _is_sqlite:
+    _engine_args.update({
+        "pool_pre_ping": True,
+        "pool_size": 10,
+        "max_overflow": 20
+    })
+else:
+    # SQLite necesita check_same_thread=False para async
+    _engine_args["connect_args"] = {"check_same_thread": False}
+
+engine = create_async_engine(settings.database_url, **_engine_args)
 
 # Session factory
 AsyncSessionLocal = async_sessionmaker(
