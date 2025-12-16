@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.core.security import (
@@ -31,9 +31,9 @@ async def register(
     """
     Registra un nuevo usuario.
     """
-    # Verificar email único
+    # Verificar email único (case-insensitive)
     result = await db.execute(
-        select(User).where(User.email == user_data.email)
+        select(User).where(func.lower(User.email) == func.lower(user_data.email))
     )
     if result.scalar_one_or_none():
         raise HTTPException(
@@ -41,9 +41,9 @@ async def register(
             detail="El email ya está registrado"
         )
 
-    # Crear usuario
+    # Crear usuario (email en minúsculas para consistencia)
     user = User(
-        email=user_data.email,
+        email=user_data.email.lower(),
         hashed_password=get_password_hash(user_data.password),
         nombre=user_data.nombre,
         apellidos=user_data.apellidos,
@@ -69,9 +69,9 @@ async def login(
     Login con email y contraseña.
     Retorna token JWT.
     """
-    # Buscar usuario
+    # Buscar usuario (case-insensitive)
     result = await db.execute(
-        select(User).where(User.email == form_data.username)
+        select(User).where(func.lower(User.email) == func.lower(form_data.username))
     )
     user = result.scalar_one_or_none()
 
