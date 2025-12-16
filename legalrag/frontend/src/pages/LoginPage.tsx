@@ -25,6 +25,8 @@ export default function LoginPage() {
     setIsLoading(true)
     try {
       const tokenData = await authApi.login(data.email, data.password)
+      // Guardar token primero para que el interceptor lo use en /me
+      useAuthStore.getState().setToken(tokenData.access_token)
       const userData = await authApi.me()
       setAuth(userData, tokenData.access_token)
       toast.success('Bienvenido a LegalRAG')
