@@ -16,7 +16,8 @@ from app.models.user import User, UserRole
 from app.schemas.user import TokenData
 
 # Configuración de hashing de contraseñas
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Usamos pbkdf2_sha256 por compatibilidad con Python 3.14 (bcrypt tiene problemas)
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_prefix}/auth/login")
