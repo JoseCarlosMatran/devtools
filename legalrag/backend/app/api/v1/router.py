@@ -64,3 +64,14 @@ try:
     )
 except ImportError as e:
     logger.warning(f"Export endpoint no disponible: {e}")
+
+# Ingestion de CENDOJ
+try:
+    from app.api.v1.endpoints import ingestion
+    api_router.include_router(
+        ingestion.router,
+        prefix="/ingestion",
+        tags=["Ingesta CENDOJ"]
+    )
+except ImportError as e:
+    logger.warning(f"Ingestion endpoint no disponible: {e}")
