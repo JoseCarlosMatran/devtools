@@ -251,17 +251,76 @@ class CendojService:
             await page.goto(main_url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(2)
 
-            # Guardar screenshot para debug
+            # IMPORTANTE: Cerrar el modal de "Aviso legal" si aparece
+            logger.info("Buscando modal de aviso legal...")
+            modal_close_selectors = [
+                "button.close",
+                ".modal .close",
+                "button[data-dismiss='modal']",
+                ".modal-header button",
+                ".bootbox-close-button",
+                "button[aria-label='Close']",
+                ".modal button.btn-close",
+            ]
+
+            modal_closed = False
+            for selector in modal_close_selectors:
+                try:
+                    close_btn = page.locator(selector).first
+                    if await close_btn.count() > 0 and await close_btn.is_visible():
+                        await close_btn.click()
+                        modal_closed = True
+                        logger.info(f"Modal cerrado con selector: {selector}")
+                        await asyncio.sleep(1)
+                        break
+                except Exception:
+                    continue
+
+            if not modal_closed:
+                # Intentar presionar Escape para cerrar modal
+                try:
+                    await page.keyboard.press("Escape")
+                    logger.info("Presionado Escape para cerrar modal")
+                    await asyncio.sleep(1)
+                except:
+                    pass
+
+            # Guardar screenshot después de cerrar modal
             try:
                 await page.screenshot(path="/tmp/cendoj_main.png")
                 logger.info("Screenshot guardado en /tmp/cendoj_main.png")
             except:
                 pass
 
-            # Intentar hacer clic en "Buscar" sin filtros para ver resultados generales
-            # o buscar enlaces a jurisprudencia
+            # Ahora rellenar el formulario de búsqueda
+            # Seleccionar jurisdicción si se especificó
+            if params.jurisdiccion:
+                try:
+                    # El select tiene múltiple, intentamos seleccionar por valor
+                    await page.locator("select[name='JURISDICCION']").select_option(value=params.jurisdiccion.value)
+                    logger.info(f"Jurisdicción seleccionada: {params.jurisdiccion.value}")
+                except Exception as e:
+                    logger.warning(f"No se pudo seleccionar jurisdicción: {e}")
 
-            # Obtener el HTML y buscar el formulario real
+            # Seleccionar tipo de órgano si se especificó
+            if params.tipo_organo:
+                try:
+                    await page.locator("select[name='TIPO_ORGANO']").select_option(value=params.tipo_organo.value)
+                    logger.info(f"Tipo órgano seleccionado: {params.tipo_organo.value}")
+                except Exception as e:
+                    logger.warning(f"No se pudo seleccionar tipo órgano: {e}")
+
+            # Texto libre
+            if params.texto_libre:
+                try:
+                    text_input = page.locator("input[name='TEXT'], textarea[name='TEXT'], #searchText").first
+                    if await text_input.count() > 0:
+                        await text_input.fill(params.texto_libre)
+                        logger.info(f"Texto de búsqueda: {params.texto_libre}")
+                except Exception as e:
+                    logger.warning(f"No se pudo establecer texto: {e}")
+
+            # Obtener el HTML
             html = await page.content()
             logger.info(f"Página cargada, longitud HTML: {len(html)}")
 
