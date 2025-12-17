@@ -492,6 +492,8 @@ class CendojService:
     async def fetch_document(self, url: str) -> Optional[CendojSentencia]:
         """
         Descarga y parsea un documento completo de CENDOJ usando Playwright.
+        NOTA: Este método puede fallar si se llama con URLs directas debido a
+        protección anti-scraping de CENDOJ. Usar fetch_document_by_click para mejor resultado.
 
         Args:
             url: URL del documento
@@ -513,6 +515,8 @@ class CendojService:
 
             # Intentar esperar por el contenido del documento
             content_selectors = [
+                "#texto_resolucion",
+                ".texto-resolucion",
                 "#contenido",
                 ".documentoTexto",
                 "#documento",
@@ -537,6 +541,125 @@ class CendojService:
 
         finally:
             await page.close()
+
+    async def fetch_documents_by_clicking(
+        self,
+        max_documents: int = 10
+    ) -> List[CendojSentencia]:
+        """
+        Descarga documentos navegando por clics dentro de la misma sesión.
+        Esto evita la protección anti-scraping de CENDOJ.
+
+        Args:
+            max_documents: Máximo de documentos a descargar
+
+        Returns:
+            Lista de CendojSentencia con los documentos descargados
+        """
+        await self._rate_limit()
+        await self._init_browser()
+
+        page = await self._context.new_page()
+        sentencias = []
+
+        try:
+            # Navegar a CENDOJ
+            main_url = f"{self.BASE_URL}/search/indexAN.jsp"
+            logger.info(f"Navegando a CENDOJ: {main_url}")
+            await page.goto(main_url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(2)
+
+            # Cerrar modal de aviso legal
+            try:
+                close_btn = page.locator("button.close").first
+                if await close_btn.count() > 0 and await close_btn.is_visible():
+                    await close_btn.click()
+                    logger.info("Modal cerrado")
+                    await asyncio.sleep(1)
+            except:
+                try:
+                    await page.keyboard.press("Escape")
+                except:
+                    pass
+
+            # Buscar enlaces a documentos
+            doc_links = page.locator("a[href*='openDocument']")
+            link_count = await doc_links.count()
+            logger.info(f"Encontrados {link_count} enlaces a documentos")
+
+            # Procesar cada enlace
+            processed = 0
+            for i in range(min(link_count, max_documents)):
+                try:
+                    await self._rate_limit()
+
+                    # Re-obtener los enlaces (pueden haber cambiado después de navegar)
+                    doc_links = page.locator("a[href*='openDocument']")
+
+                    if i >= await doc_links.count():
+                        break
+
+                    link = doc_links.nth(i)
+                    link_text = await link.inner_text()
+
+                    # Filtrar solo enlaces que parecen sentencias
+                    if not any(x in link_text for x in ["STS", "SAP", "STSJ", "SAN", "ATS"]):
+                        continue
+
+                    logger.info(f"Haciendo clic en: {link_text[:50]}")
+
+                    # Hacer clic y esperar navegación
+                    await link.click()
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(2)
+
+                    # Obtener HTML y parsear
+                    html = await page.content()
+                    current_url = page.url
+
+                    sentencia = self._parse_document(html, current_url)
+                    if sentencia:
+                        sentencias.append(sentencia)
+                        logger.info(f"Documento extraído: {sentencia.roj or sentencia.ecli or 'sin identificador'}")
+                        processed += 1
+                    else:
+                        logger.warning(f"No se pudo extraer documento de {current_url}")
+
+                    # Volver atrás
+                    await page.go_back()
+                    await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    await asyncio.sleep(1)
+
+                    if processed >= max_documents:
+                        break
+
+                except Exception as e:
+                    logger.error(f"Error procesando enlace {i}: {e}")
+                    # Intentar volver a la página principal si nos perdimos
+                    try:
+                        await page.goto(main_url, wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(2)
+                        # Cerrar modal si aparece
+                        try:
+                            close_btn = page.locator("button.close").first
+                            if await close_btn.count() > 0:
+                                await close_btn.click()
+                        except:
+                            pass
+                    except:
+                        pass
+                    continue
+
+            logger.info(f"Total documentos extraídos: {len(sentencias)}")
+
+        except Exception as e:
+            logger.error(f"Error en fetch_documents_by_clicking: {e}")
+            raise
+
+        finally:
+            await page.close()
+
+        return sentencias
 
     def _parse_document(self, html: str, url: str) -> Optional[CendojSentencia]:
         """Parsea el documento completo de una sentencia."""

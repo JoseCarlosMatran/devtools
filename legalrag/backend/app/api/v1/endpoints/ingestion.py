@@ -239,6 +239,72 @@ async def ingest_jurisprudencia(
         )
 
 
+@router.post("/ingest-click", response_model=IngestionResponse)
+async def ingest_by_clicking(
+    max_documentos: int = 5,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN_DESPACHO, UserRole.SUPER_ADMIN))
+):
+    """
+    Ingesta sentencias navegando por clics (evita protección anti-scraping).
+
+    Este método navega dentro de CENDOJ haciendo clic en los enlaces,
+    lo que mantiene la sesión y evita que CENDOJ bloquee las peticiones.
+
+    Requiere rol de administrador.
+    """
+    if max_documentos > 20:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Máximo 20 documentos por sesión de clic"
+        )
+
+    service = CendojService()
+
+    stats = {
+        "searched": 0,
+        "downloaded": 0,
+        "saved": 0,
+        "duplicates": 0,
+        "errors": 0
+    }
+
+    try:
+        # Obtener documentos navegando por clics
+        sentencias = await service.fetch_documents_by_clicking(max_documents=max_documentos)
+        stats["searched"] = max_documentos
+        stats["downloaded"] = len(sentencias)
+
+        # Guardar cada sentencia
+        for sentencia in sentencias:
+            try:
+                saved = await service.ingest_sentencia(sentencia, db, index_in_qdrant=True)
+                if saved:
+                    stats["saved"] += 1
+                else:
+                    stats["duplicates"] += 1
+            except Exception as e:
+                logger.error(f"Error guardando sentencia: {e}")
+                stats["errors"] += 1
+
+        return IngestionResponse(
+            searched=stats["searched"],
+            downloaded=stats["downloaded"],
+            saved=stats["saved"],
+            duplicates=stats["duplicates"],
+            errors=stats["errors"],
+            message=f"Ingesta completada: {stats['saved']} nuevas sentencias guardadas"
+        )
+    except Exception as e:
+        logger.error(f"Error en ingesta por clic: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en proceso de ingesta: {str(e)}"
+        )
+    finally:
+        await service.close()
+
+
 async def _run_background_ingestion(
     task_id: str,
     params: CendojSearchParams,
