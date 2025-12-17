@@ -1,6 +1,7 @@
 """
 Servicio de ingesta de jurisprudencia desde CENDOJ.
-Scraper respetuoso para el Centro de Documentación Judicial.
+Utiliza Playwright para automatizar el navegador y extraer resultados
+de la web del Poder Judicial que carga dinámicamente con JavaScript.
 """
 import asyncio
 import logging
@@ -10,7 +11,6 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 
-import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -76,44 +76,47 @@ class CendojSentencia:
 
 class CendojService:
     """
-    Servicio para extraer jurisprudencia de CENDOJ.
+    Servicio para extraer jurisprudencia de CENDOJ usando Playwright.
 
-    Implementa scraping respetuoso con:
-    - Rate limiting (1 petición/segundo)
-    - User-Agent identificativo
-    - Respeto a robots.txt
+    Utiliza automatización de navegador para manejar la carga
+    dinámica de JavaScript en la web del Poder Judicial.
     """
 
     BASE_URL = "https://www.poderjudicial.es"
-    SEARCH_URL = f"{BASE_URL}/search/indexAN.jsp"
-    DOCUMENT_URL = f"{BASE_URL}/search/documento/documento.jsp"
-
-    # Headers para identificarnos correctamente
-    HEADERS = {
-        "User-Agent": "LegalRAG/1.0 (Legal research; contacto@legalrag.es)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
-    }
+    SEARCH_PAGE = f"{BASE_URL}/search/indexAN.jsp"
 
     # Rate limiting: segundos entre peticiones
-    RATE_LIMIT = 1.0
+    RATE_LIMIT = 2.0
 
     def __init__(self):
         self._last_request_time = 0
-        self._client: Optional[httpx.AsyncClient] = None
+        self._browser = None
+        self._playwright = None
+        self._context = None
         self._rag_service: Optional[RAGService] = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Obtiene cliente HTTP (lazy initialization)."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                headers=self.HEADERS,
-                timeout=30.0,
-                follow_redirects=True
-            )
-        return self._client
+    async def _init_browser(self):
+        """Inicializa el navegador Playwright."""
+        if self._browser is None:
+            try:
+                from playwright.async_api import async_playwright
+
+                self._playwright = await async_playwright().start()
+                self._browser = await self._playwright.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox']
+                )
+                self._context = await self._browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    locale="es-ES",
+                    timezone_id="Europe/Madrid"
+                )
+                logger.info("Navegador Playwright inicializado")
+            except ImportError:
+                raise ImportError(
+                    "Playwright no está instalado. "
+                    "Ejecuta: pip install playwright && playwright install chromium"
+                )
 
     async def _get_rag_service(self) -> RAGService:
         """Obtiene servicio RAG."""
@@ -130,10 +133,17 @@ class CendojService:
         self._last_request_time = asyncio.get_event_loop().time()
 
     async def close(self):
-        """Cierra conexiones."""
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        """Cierra el navegador y conexiones."""
+        if self._context:
+            await self._context.close()
+            self._context = None
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+        logger.info("Navegador Playwright cerrado")
 
     def _map_jurisdiccion(self, codigo: str) -> Jurisdiccion:
         """Mapea código CENDOJ a enum de jurisdicción."""
@@ -172,7 +182,6 @@ class CendojService:
 
     def _extract_sede(self, tribunal: str) -> Optional[str]:
         """Extrae la sede del nombre del tribunal."""
-        # Patrones comunes: "Audiencia Provincial de Madrid", "TSJ de Cataluña"
         patterns = [
             r"de\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)\s*$",
             r"de\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)\s*,",
@@ -185,54 +194,181 @@ class CendojService:
 
     async def search(self, params: CendojSearchParams) -> List[Dict[str, Any]]:
         """
-        Busca sentencias en CENDOJ.
+        Busca sentencias en CENDOJ usando Playwright.
 
         Returns:
             Lista de resultados con metadatos básicos y URL al documento.
         """
         await self._rate_limit()
-        client = await self._get_client()
+        await self._init_browser()
 
-        # Construir parámetros de búsqueda
-        search_params = {
-            "ESSION": "null",
-            "sort": "DTF_desc",  # Ordenar por fecha descendente
-            "recordsPerPage": str(params.num_registros),
-            "currentPage": str(params.pagina),
-        }
-
-        if params.jurisdiccion:
-            search_params["JURISDICCION"] = params.jurisdiccion.value
-
-        if params.tipo_organo:
-            search_params["TIPO_ORGANO"] = params.tipo_organo.value
-
-        if params.fecha_desde:
-            search_params["FECHA_DESDE"] = params.fecha_desde.strftime("%d/%m/%Y")
-
-        if params.fecha_hasta:
-            search_params["FECHA_HASTA"] = params.fecha_hasta.strftime("%d/%m/%Y")
-
-        if params.texto_libre:
-            search_params["TEXT"] = params.texto_libre
+        page = await self._context.new_page()
+        results = []
 
         try:
-            response = await client.get(self.SEARCH_URL, params=search_params)
-            response.raise_for_status()
+            logger.info(f"Navegando a CENDOJ: {self.SEARCH_PAGE}")
+            await page.goto(self.SEARCH_PAGE, wait_until="networkidle", timeout=60000)
 
-            return self._parse_search_results(response.text)
+            # Esperar a que cargue el formulario
+            await page.wait_for_selector("form", timeout=30000)
 
-        except httpx.HTTPError as e:
+            # Rellenar formulario de búsqueda
+            # Jurisdicción
+            if params.jurisdiccion:
+                try:
+                    await page.select_option(
+                        "select[name='JURISDICCION'], #JURISDICCION",
+                        value=params.jurisdiccion.value
+                    )
+                except Exception as e:
+                    logger.warning(f"No se pudo seleccionar jurisdicción: {e}")
+
+            # Tipo de órgano
+            if params.tipo_organo:
+                try:
+                    await page.select_option(
+                        "select[name='TIPO_ORGANO'], #TIPO_ORGANO",
+                        value=params.tipo_organo.value
+                    )
+                except Exception as e:
+                    logger.warning(f"No se pudo seleccionar tipo de órgano: {e}")
+
+            # Fecha desde
+            if params.fecha_desde:
+                try:
+                    fecha_str = params.fecha_desde.strftime("%d/%m/%Y")
+                    await page.fill("input[name='FECHA_DESDE'], #FECHA_DESDE", fecha_str)
+                except Exception as e:
+                    logger.warning(f"No se pudo establecer fecha desde: {e}")
+
+            # Fecha hasta
+            if params.fecha_hasta:
+                try:
+                    fecha_str = params.fecha_hasta.strftime("%d/%m/%Y")
+                    await page.fill("input[name='FECHA_HASTA'], #FECHA_HASTA", fecha_str)
+                except Exception as e:
+                    logger.warning(f"No se pudo establecer fecha hasta: {e}")
+
+            # Texto libre
+            if params.texto_libre:
+                try:
+                    await page.fill(
+                        "input[name='TEXT'], textarea[name='TEXT'], #TEXT",
+                        params.texto_libre
+                    )
+                except Exception as e:
+                    logger.warning(f"No se pudo establecer texto libre: {e}")
+
+            # Buscar el botón de búsqueda y hacer clic
+            search_button_selectors = [
+                "button[type='submit']",
+                "input[type='submit']",
+                "button:has-text('Buscar')",
+                "input[value='Buscar']",
+                ".btn-buscar",
+                "#buscar"
+            ]
+
+            clicked = False
+            for selector in search_button_selectors:
+                try:
+                    btn = page.locator(selector).first
+                    if await btn.count() > 0:
+                        await btn.click()
+                        clicked = True
+                        logger.info(f"Clic en botón de búsqueda: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Intentar enviar el formulario directamente
+                await page.evaluate("document.forms[0].submit()")
+                logger.info("Formulario enviado via JavaScript")
+
+            # Esperar a que carguen los resultados
+            await asyncio.sleep(3)  # Espera inicial
+
+            # Intentar esperar por diferentes selectores de resultados
+            result_selectors = [
+                ".listado-documentos",
+                ".resultados",
+                "#resultados",
+                ".documento",
+                "table.resultados",
+                ".list-group-item"
+            ]
+
+            content_loaded = False
+            for selector in result_selectors:
+                try:
+                    await page.wait_for_selector(selector, timeout=10000)
+                    content_loaded = True
+                    logger.info(f"Resultados encontrados con selector: {selector}")
+                    break
+                except Exception:
+                    continue
+
+            if not content_loaded:
+                # Esperar un poco más y obtener el contenido de todas formas
+                await asyncio.sleep(5)
+                logger.warning("No se encontró selector de resultados específico, extrayendo contenido")
+
+            # Obtener el HTML de la página
+            html = await page.content()
+
+            # Parsear resultados
+            results = self._parse_search_results(html)
+            logger.info(f"Encontrados {len(results)} resultados")
+
+        except Exception as e:
             logger.error(f"Error en búsqueda CENDOJ: {e}")
+            # Guardar screenshot para debug
+            try:
+                await page.screenshot(path="/tmp/cendoj_error.png")
+                logger.info("Screenshot guardado en /tmp/cendoj_error.png")
+            except:
+                pass
             raise
+
+        finally:
+            await page.close()
+
+        return results
 
     def _parse_search_results(self, html: str) -> List[Dict[str, Any]]:
         """Parsea los resultados de búsqueda."""
         soup = BeautifulSoup(html, "html.parser")
         results = []
 
-        # Buscar los bloques de resultados
-        for item in soup.select(".listadoDocumentos .documento, .resultado"):
+        # Múltiples selectores posibles para resultados
+        selectors = [
+            ".listado-documentos .documento",
+            ".resultado",
+            ".list-group-item",
+            "tr.resultado",
+            ".item-resultado",
+            "article",
+            ".card"
+        ]
+
+        items = []
+        for selector in selectors:
+            items = soup.select(selector)
+            if items:
+                logger.info(f"Encontrados {len(items)} items con selector: {selector}")
+                break
+
+        # Si no encontramos con selectores específicos, buscar enlaces a documentos
+        if not items:
+            links = soup.find_all("a", href=re.compile(r"documento|sentencia|resolucion", re.I))
+            for link in links:
+                parent = link.find_parent(["div", "tr", "li", "article"])
+                if parent and parent not in items:
+                    items.append(parent)
+            logger.info(f"Encontrados {len(items)} items mediante enlaces")
+
+        for item in items:
             try:
                 result = self._parse_result_item(item)
                 if result:
@@ -246,7 +382,11 @@ class CendojService:
     def _parse_result_item(self, item) -> Optional[Dict[str, Any]]:
         """Parsea un item individual de resultados."""
         # Extraer ROJ/ECLI del título o enlace
-        link = item.select_one("a[href*='documento']")
+        link = item.select_one("a[href*='documento'], a[href*='sentencia'], a[href*='DOC']")
+        if not link:
+            # Buscar cualquier enlace
+            link = item.select_one("a[href]")
+
         if not link:
             return None
 
@@ -254,11 +394,15 @@ class CendojService:
         if not url.startswith("http"):
             url = f"{self.BASE_URL}{url}"
 
-        # Extraer identificadores
+        # Extraer texto completo del item
         text = item.get_text(" ", strip=True)
 
+        if len(text) < 10:  # Filtrar items sin contenido útil
+            return None
+
+        # Extraer identificadores
         ecli_match = re.search(r"ECLI:ES:\w+:\d{4}:\d+", text)
-        roj_match = re.search(r"(STS|SAP|STSJ|SAN|ATS|AAP)\s*\d+/\d{4}", text)
+        roj_match = re.search(r"((?:STS|SAP|STSJ|SAN|ATS|AAP|SJMER|SJS|AUTO)\s*\d+/\d{4})", text, re.I)
 
         # Extraer fecha
         fecha_match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
@@ -271,13 +415,23 @@ class CendojService:
                 pass
 
         # Extraer tribunal
-        tribunal_elem = item.select_one(".tribunal, .organo")
-        tribunal = tribunal_elem.get_text(strip=True) if tribunal_elem else ""
+        tribunal = ""
+        tribunal_patterns = [
+            r"(Tribunal Supremo[^,\n]*)",
+            r"(Audiencia (?:Nacional|Provincial)[^,\n]*)",
+            r"((?:TSJ|Tribunal Superior)[^,\n]*)",
+            r"(Juzgado[^,\n]*)",
+        ]
+        for pattern in tribunal_patterns:
+            match = re.search(pattern, text, re.I)
+            if match:
+                tribunal = match.group(1).strip()
+                break
 
         return {
             "url": url,
             "ecli": ecli_match.group(0) if ecli_match else None,
-            "roj": roj_match.group(0) if roj_match else None,
+            "roj": roj_match.group(1) if roj_match else None,
             "tribunal": tribunal,
             "fecha": fecha,
             "resumen": text[:500] if text else ""
@@ -285,7 +439,7 @@ class CendojService:
 
     async def fetch_document(self, url: str) -> Optional[CendojSentencia]:
         """
-        Descarga y parsea un documento completo de CENDOJ.
+        Descarga y parsea un documento completo de CENDOJ usando Playwright.
 
         Args:
             url: URL del documento
@@ -294,17 +448,43 @@ class CendojService:
             CendojSentencia con todos los datos extraídos
         """
         await self._rate_limit()
-        client = await self._get_client()
+        await self._init_browser()
+
+        page = await self._context.new_page()
 
         try:
-            response = await client.get(url)
-            response.raise_for_status()
+            logger.info(f"Descargando documento: {url}")
+            await page.goto(url, wait_until="networkidle", timeout=60000)
 
-            return self._parse_document(response.text, url)
+            # Esperar a que cargue el contenido
+            await asyncio.sleep(2)
 
-        except httpx.HTTPError as e:
+            # Intentar esperar por el contenido del documento
+            content_selectors = [
+                "#contenido",
+                ".documentoTexto",
+                "#documento",
+                ".contenido-documento",
+                "article",
+                ".texto-resolucion"
+            ]
+
+            for selector in content_selectors:
+                try:
+                    await page.wait_for_selector(selector, timeout=5000)
+                    break
+                except:
+                    continue
+
+            html = await page.content()
+            return self._parse_document(html, url)
+
+        except Exception as e:
             logger.error(f"Error descargando documento {url}: {e}")
             return None
+
+        finally:
+            await page.close()
 
     def _parse_document(self, html: str, url: str) -> Optional[CendojSentencia]:
         """Parsea el documento completo de una sentencia."""
@@ -326,7 +506,12 @@ class CendojService:
                     pass
 
         # Buscar en el contenido principal
-        contenido = soup.select_one("#contenido, .documentoTexto, #documento")
+        contenido = None
+        for selector in ["#contenido", ".documentoTexto", "#documento", ".contenido-documento", "article", "main"]:
+            contenido = soup.select_one(selector)
+            if contenido:
+                break
+
         if not contenido:
             contenido = soup.body
 
@@ -440,7 +625,6 @@ class CendojService:
         """Infiere la jurisdicción del contenido del texto."""
         texto_lower = texto.lower()[:5000]
 
-        # Indicadores por jurisdicción
         indicadores = {
             Jurisdiccion.SOCIAL: [
                 "despido", "estatuto de los trabajadores", "convenio colectivo",
@@ -473,14 +657,13 @@ class CendojService:
                 if palabra in texto_lower:
                     scores[jurisdiccion] += 1
 
-        # Devolver la jurisdicción con más coincidencias
         max_score = max(scores.values())
         if max_score > 0:
             for j, score in scores.items():
                 if score == max_score:
                     return j
 
-        return Jurisdiccion.CIVIL  # Por defecto
+        return Jurisdiccion.CIVIL
 
     async def ingest_sentencia(
         self,
