@@ -542,6 +542,22 @@ class CendojService:
         """Parsea el documento completo de una sentencia."""
         soup = BeautifulSoup(html, "html.parser")
 
+        # Detectar páginas de error
+        error_indicators = [
+            "algo ha fallado",
+            "Lo sentimos",
+            "error",
+            "no encontrado",
+            "no disponible",
+            "vuelva a intentarlo"
+        ]
+
+        page_text = soup.get_text().lower()
+        for indicator in error_indicators:
+            if indicator.lower() in page_text and len(page_text) < 5000:
+                logger.warning(f"Página de error detectada para {url}")
+                return None
+
         sentencia = CendojSentencia(url_documento=url)
 
         # Extraer metadatos de la cabecera
@@ -557,11 +573,25 @@ class CendojService:
                 except ValueError:
                     pass
 
-        # Buscar en el contenido principal
+        # Buscar en el contenido principal - selectores específicos de CENDOJ
         contenido = None
-        for selector in ["#contenido", ".documentoTexto", "#documento", ".contenido-documento", "article", "main"]:
+        content_selectors = [
+            "#texto_resolucion",
+            ".texto-resolucion",
+            "#contenidoDocumento",
+            ".contenido-documento",
+            "#documentoTexto",
+            ".documentoTexto",
+            "#contenido",
+            "#documento",
+            "article.documento",
+            "main"
+        ]
+
+        for selector in content_selectors:
             contenido = soup.select_one(selector)
             if contenido:
+                logger.info(f"Contenido encontrado con selector: {selector}")
                 break
 
         if not contenido:
@@ -571,6 +601,18 @@ class CendojService:
             return None
 
         texto_completo = contenido.get_text("\n", strip=True)
+
+        # Verificar que tenemos contenido sustancial (una sentencia real)
+        if len(texto_completo) < 500:
+            logger.warning(f"Contenido demasiado corto ({len(texto_completo)} chars) para {url}")
+            return None
+
+        # Verificar que parece una sentencia (tiene algún indicador legal)
+        sentencia_indicators = ["FUNDAMENTOS", "FALLO", "ANTECEDENTES", "HECHOS", "DERECHO", "TRIBUNAL", "SENTENCIA"]
+        has_indicator = any(ind in texto_completo.upper() for ind in sentencia_indicators)
+        if not has_indicator:
+            logger.warning(f"No parece ser una sentencia válida: {url}")
+            return None
         sentencia.texto_completo = texto_completo
 
         # Extraer ROJ del texto
