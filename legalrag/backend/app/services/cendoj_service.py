@@ -233,16 +233,6 @@ class CendojService:
         page = await self._context.new_page()
         results = []
 
-        # Diferentes URLs de búsqueda a probar
-        search_urls = [
-            # URL principal de jurisprudencia
-            f"{self.BASE_URL}/search/jurisprudencia/",
-            # Buscador AN
-            self.SEARCH_PAGE,
-            # Portal de jurisprudencia
-            f"{self.BASE_URL}/cgpj/es/Poder-Judicial/Tribunal-Supremo/Jurisprudencia/",
-        ]
-
         try:
             # Primero, ir a la página principal de búsqueda de jurisprudencia
             main_url = f"{self.BASE_URL}/search/indexAN.jsp"
@@ -292,146 +282,100 @@ class CendojService:
             except:
                 pass
 
-            # Ahora rellenar el formulario de búsqueda
-            # Seleccionar jurisdicción si se especificó
-            if params.jurisdiccion:
+            # Estrategia 1: Buscar enlaces directos a sentencias en "más consultadas"
+            # Estos enlaces tienen formato como "STSJ ICAN 3407/2025" o "SAN 4797/2025"
+            sentencia_links = await page.locator("a[href*='/search/documento'], a[href*='openDocument']").all()
+            logger.info(f"Encontrados {len(sentencia_links)} enlaces a documentos")
+
+            for link in sentencia_links[:params.num_registros]:
                 try:
-                    # El select tiene múltiple, intentamos seleccionar por valor
-                    await page.locator("select[name='JURISDICCION']").select_option(value=params.jurisdiccion.value)
-                    logger.info(f"Jurisdicción seleccionada: {params.jurisdiccion.value}")
+                    href = await link.get_attribute("href")
+                    text = await link.inner_text()
+                    if href and text:
+                        # Filtrar enlaces que no son sentencias (tag cloud, navegación, etc)
+                        if len(text) < 200 and ("STS" in text or "SAP" in text or "STSJ" in text or "SAN" in text or "ATS" in text or "/" in text):
+                            url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
+                            logger.info(f"Enlace encontrado: {text[:50]} -> {url[:80]}")
+
+                            # Extraer info del texto
+                            ecli_match = re.search(r"ECLI:ES:\w+:\d{4}:\d+", text)
+                            roj_match = re.search(r"((?:STS|SAP|STSJ|SAN|ATS|AAP|SJMER|SJS|AUTO)\s*\d+/\d{4})", text, re.I)
+                            fecha_match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+
+                            fecha = None
+                            if fecha_match:
+                                try:
+                                    dia, mes, año = fecha_match.groups()
+                                    fecha = date(int(año), int(mes), int(dia))
+                                except:
+                                    pass
+
+                            results.append({
+                                "url": url,
+                                "ecli": ecli_match.group(0) if ecli_match else None,
+                                "roj": roj_match.group(1) if roj_match else None,
+                                "tribunal": "",
+                                "fecha": fecha,
+                                "resumen": text.strip()[:500]
+                            })
                 except Exception as e:
-                    logger.warning(f"No se pudo seleccionar jurisdicción: {e}")
-
-            # Seleccionar tipo de órgano si se especificó
-            if params.tipo_organo:
-                try:
-                    await page.locator("select[name='TIPO_ORGANO']").select_option(value=params.tipo_organo.value)
-                    logger.info(f"Tipo órgano seleccionado: {params.tipo_organo.value}")
-                except Exception as e:
-                    logger.warning(f"No se pudo seleccionar tipo órgano: {e}")
-
-            # Texto libre
-            if params.texto_libre:
-                try:
-                    text_input = page.locator("input[name='TEXT'], textarea[name='TEXT'], #searchText").first
-                    if await text_input.count() > 0:
-                        await text_input.fill(params.texto_libre)
-                        logger.info(f"Texto de búsqueda: {params.texto_libre}")
-                except Exception as e:
-                    logger.warning(f"No se pudo establecer texto: {e}")
-
-            # Obtener el HTML
-            html = await page.content()
-            logger.info(f"Página cargada, longitud HTML: {len(html)}")
-
-            # Buscar si hay iframe
-            iframes = await page.query_selector_all("iframe")
-            if iframes:
-                logger.info(f"Encontrados {len(iframes)} iframes")
-                for i, iframe in enumerate(iframes):
-                    try:
-                        frame = await iframe.content_frame()
-                        if frame:
-                            frame_html = await frame.content()
-                            logger.info(f"Iframe {i} longitud: {len(frame_html)}")
-                            html += frame_html
-                    except:
-                        pass
-
-            # Buscar botón de búsqueda y hacer clic
-            search_selectors = [
-                "button:has-text('Buscar')",
-                "input[type='submit'][value*='Buscar']",
-                "a:has-text('Buscar')",
-                "#btnBuscar",
-                ".btn-buscar",
-                "button[type='submit']",
-            ]
-
-            clicked = False
-            for selector in search_selectors:
-                try:
-                    btn = page.locator(selector).first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        await btn.click()
-                        clicked = True
-                        logger.info(f"Clic en: {selector}")
-                        await asyncio.sleep(5)
-                        break
-                except Exception as e:
-                    logger.debug(f"Selector {selector} falló: {e}")
+                    logger.debug(f"Error procesando enlace: {e}")
                     continue
 
-            if not clicked:
-                # Intentar enviar cualquier formulario
-                forms = await page.query_selector_all("form")
-                logger.info(f"Formularios encontrados: {len(forms)}")
-                if forms:
-                    try:
-                        await page.evaluate("document.forms[0].submit()")
-                        logger.info("Formulario enviado via JavaScript")
+            # Si no encontramos enlaces directos, intentar hacer la búsqueda
+            if len(results) < 3:
+                logger.info("Pocos resultados directos, intentando búsqueda...")
+
+                # Hacer clic en botón de búsqueda para obtener resultados
+                # En CENDOJ el formulario se envía con el ID del form
+                try:
+                    # Buscar y hacer clic en el botón de envío
+                    submit_btn = page.locator("input[type='submit'], button[type='submit']").first
+                    if await submit_btn.count() > 0:
+                        await submit_btn.click()
+                        logger.info("Botón de búsqueda clickeado")
                         await asyncio.sleep(5)
-                    except:
-                        pass
 
-            # Esperar a que carguen los resultados
-            await asyncio.sleep(3)
+                        # Guardar screenshot de resultados
+                        try:
+                            await page.screenshot(path="/tmp/cendoj_results.png", full_page=True)
+                            logger.info("Screenshot de resultados guardado")
+                        except:
+                            pass
 
-            # Intentar esperar por diferentes selectores de resultados
-            result_selectors = [
-                ".listadoDocumentos",
-                ".listado-documentos",
-                "#listadoDocumentos",
-                ".resultado",
-                "#resultados",
-                "table.resultados",
-                ".list-group-item",
-                "article.resultado",
-                ".documento",
-                "div[class*='result']",
-                "div[class*='documento']",
-                "tr[class*='result']",
-            ]
+                        # Buscar enlaces a documentos en la página de resultados
+                        result_links = await page.locator("a[href*='documento'], a[href*='openDocument']").all()
+                        logger.info(f"Encontrados {len(result_links)} enlaces en resultados")
 
-            content_loaded = False
-            for selector in result_selectors:
-                try:
-                    locator = page.locator(selector)
-                    count = await locator.count()
-                    if count > 0:
-                        content_loaded = True
-                        logger.info(f"Resultados encontrados con selector: {selector} ({count} elementos)")
-                        break
-                except Exception:
-                    continue
+                        for link in result_links[:params.num_registros]:
+                            try:
+                                href = await link.get_attribute("href")
+                                text = await link.inner_text()
+                                if href and text and len(text) < 200:
+                                    url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
 
-            if not content_loaded:
-                logger.warning("No se encontró selector de resultados específico")
-                # Guardar screenshot de debug
-                try:
-                    await page.screenshot(path="/tmp/cendoj_no_results.png", full_page=True)
-                    logger.info("Screenshot guardado en /tmp/cendoj_no_results.png")
-                except:
-                    pass
+                                    # Verificar que no está duplicado
+                                    if not any(r["url"] == url for r in results):
+                                        ecli_match = re.search(r"ECLI:ES:\w+:\d{4}:\d+", text)
+                                        roj_match = re.search(r"((?:STS|SAP|STSJ|SAN|ATS|AAP|SJMER|SJS|AUTO)\s*\d+/\d{4})", text, re.I)
 
-            # Obtener el HTML de la página
-            html = await page.content()
+                                        results.append({
+                                            "url": url,
+                                            "ecli": ecli_match.group(0) if ecli_match else None,
+                                            "roj": roj_match.group(1) if roj_match else None,
+                                            "tribunal": "",
+                                            "fecha": None,
+                                            "resumen": text.strip()[:500]
+                                        })
+                            except:
+                                continue
+                except Exception as e:
+                    logger.warning(f"Error en búsqueda: {e}")
 
-            # Log para debug: buscar patrones conocidos
-            if "ECLI:" in html:
-                logger.info("Encontrado patrón ECLI en HTML")
-            if "STS" in html or "SAP" in html or "STSJ" in html:
-                logger.info("Encontrados identificadores de sentencias en HTML")
-            if "No se han encontrado" in html or "sin resultados" in html.lower():
-                logger.info("Página indica que no hay resultados")
-
-            # Parsear resultados
-            results = self._parse_search_results(html)
-            logger.info(f"Encontrados {len(results)} resultados")
+            logger.info(f"Total resultados encontrados: {len(results)}")
 
         except Exception as e:
             logger.error(f"Error en búsqueda CENDOJ: {e}")
-            # Guardar screenshot para debug
             try:
                 await page.screenshot(path="/tmp/cendoj_error.png")
                 logger.info("Screenshot guardado en /tmp/cendoj_error.png")
