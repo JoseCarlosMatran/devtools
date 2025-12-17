@@ -192,9 +192,37 @@ class CendojService:
                 return match.group(1)
         return None
 
+    def _build_search_url(self, params: CendojSearchParams) -> str:
+        """Construye la URL de búsqueda con parámetros."""
+        from urllib.parse import urlencode
+
+        query_params = {
+            "sort": "DTF_desc",
+            "recordsPerPage": str(params.num_registros),
+            "currentPage": str(params.pagina),
+        }
+
+        if params.jurisdiccion:
+            query_params["JURISDICCION"] = params.jurisdiccion.value
+
+        if params.tipo_organo:
+            query_params["TIPO_ORGANO"] = params.tipo_organo.value
+
+        if params.fecha_desde:
+            query_params["FD"] = params.fecha_desde.strftime("%d/%m/%Y")
+
+        if params.fecha_hasta:
+            query_params["FH"] = params.fecha_hasta.strftime("%d/%m/%Y")
+
+        if params.texto_libre:
+            query_params["TEXT"] = params.texto_libre
+
+        return f"{self.BASE_URL}/search/AN/openDocument/{urlencode(query_params)}"
+
     async def search(self, params: CendojSearchParams) -> List[Dict[str, Any]]:
         """
         Busca sentencias en CENDOJ usando Playwright.
+        Navega directamente a la URL de resultados para que JavaScript renderice.
 
         Returns:
             Lista de resultados con metadatos básicos y URL al documento.
@@ -205,117 +233,138 @@ class CendojService:
         page = await self._context.new_page()
         results = []
 
+        # Diferentes URLs de búsqueda a probar
+        search_urls = [
+            # URL principal de jurisprudencia
+            f"{self.BASE_URL}/search/jurisprudencia/",
+            # Buscador AN
+            self.SEARCH_PAGE,
+            # Portal de jurisprudencia
+            f"{self.BASE_URL}/cgpj/es/Poder-Judicial/Tribunal-Supremo/Jurisprudencia/",
+        ]
+
         try:
-            logger.info(f"Navegando a CENDOJ: {self.SEARCH_PAGE}")
-            await page.goto(self.SEARCH_PAGE, wait_until="networkidle", timeout=60000)
+            # Primero, ir a la página principal de búsqueda de jurisprudencia
+            main_url = f"{self.BASE_URL}/search/indexAN.jsp"
+            logger.info(f"Navegando a CENDOJ: {main_url}")
 
-            # Esperar a que cargue el formulario
-            await page.wait_for_selector("form", timeout=30000)
+            await page.goto(main_url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(2)
 
-            # Rellenar formulario de búsqueda
-            # Jurisdicción
-            if params.jurisdiccion:
-                try:
-                    await page.select_option(
-                        "select[name='JURISDICCION'], #JURISDICCION",
-                        value=params.jurisdiccion.value
-                    )
-                except Exception as e:
-                    logger.warning(f"No se pudo seleccionar jurisdicción: {e}")
+            # Guardar screenshot para debug
+            try:
+                await page.screenshot(path="/tmp/cendoj_main.png")
+                logger.info("Screenshot guardado en /tmp/cendoj_main.png")
+            except:
+                pass
 
-            # Tipo de órgano
-            if params.tipo_organo:
-                try:
-                    await page.select_option(
-                        "select[name='TIPO_ORGANO'], #TIPO_ORGANO",
-                        value=params.tipo_organo.value
-                    )
-                except Exception as e:
-                    logger.warning(f"No se pudo seleccionar tipo de órgano: {e}")
+            # Intentar hacer clic en "Buscar" sin filtros para ver resultados generales
+            # o buscar enlaces a jurisprudencia
 
-            # Fecha desde
-            if params.fecha_desde:
-                try:
-                    fecha_str = params.fecha_desde.strftime("%d/%m/%Y")
-                    await page.fill("input[name='FECHA_DESDE'], #FECHA_DESDE", fecha_str)
-                except Exception as e:
-                    logger.warning(f"No se pudo establecer fecha desde: {e}")
+            # Obtener el HTML y buscar el formulario real
+            html = await page.content()
+            logger.info(f"Página cargada, longitud HTML: {len(html)}")
 
-            # Fecha hasta
-            if params.fecha_hasta:
-                try:
-                    fecha_str = params.fecha_hasta.strftime("%d/%m/%Y")
-                    await page.fill("input[name='FECHA_HASTA'], #FECHA_HASTA", fecha_str)
-                except Exception as e:
-                    logger.warning(f"No se pudo establecer fecha hasta: {e}")
+            # Buscar si hay iframe
+            iframes = await page.query_selector_all("iframe")
+            if iframes:
+                logger.info(f"Encontrados {len(iframes)} iframes")
+                for i, iframe in enumerate(iframes):
+                    try:
+                        frame = await iframe.content_frame()
+                        if frame:
+                            frame_html = await frame.content()
+                            logger.info(f"Iframe {i} longitud: {len(frame_html)}")
+                            html += frame_html
+                    except:
+                        pass
 
-            # Texto libre
-            if params.texto_libre:
-                try:
-                    await page.fill(
-                        "input[name='TEXT'], textarea[name='TEXT'], #TEXT",
-                        params.texto_libre
-                    )
-                except Exception as e:
-                    logger.warning(f"No se pudo establecer texto libre: {e}")
-
-            # Buscar el botón de búsqueda y hacer clic
-            search_button_selectors = [
-                "button[type='submit']",
-                "input[type='submit']",
+            # Buscar botón de búsqueda y hacer clic
+            search_selectors = [
                 "button:has-text('Buscar')",
-                "input[value='Buscar']",
+                "input[type='submit'][value*='Buscar']",
+                "a:has-text('Buscar')",
+                "#btnBuscar",
                 ".btn-buscar",
-                "#buscar"
+                "button[type='submit']",
             ]
 
             clicked = False
-            for selector in search_button_selectors:
+            for selector in search_selectors:
                 try:
                     btn = page.locator(selector).first
-                    if await btn.count() > 0:
+                    if await btn.count() > 0 and await btn.is_visible():
                         await btn.click()
                         clicked = True
-                        logger.info(f"Clic en botón de búsqueda: {selector}")
+                        logger.info(f"Clic en: {selector}")
+                        await asyncio.sleep(5)
                         break
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Selector {selector} falló: {e}")
                     continue
 
             if not clicked:
-                # Intentar enviar el formulario directamente
-                await page.evaluate("document.forms[0].submit()")
-                logger.info("Formulario enviado via JavaScript")
+                # Intentar enviar cualquier formulario
+                forms = await page.query_selector_all("form")
+                logger.info(f"Formularios encontrados: {len(forms)}")
+                if forms:
+                    try:
+                        await page.evaluate("document.forms[0].submit()")
+                        logger.info("Formulario enviado via JavaScript")
+                        await asyncio.sleep(5)
+                    except:
+                        pass
 
             # Esperar a que carguen los resultados
-            await asyncio.sleep(3)  # Espera inicial
+            await asyncio.sleep(3)
 
             # Intentar esperar por diferentes selectores de resultados
             result_selectors = [
+                ".listadoDocumentos",
                 ".listado-documentos",
-                ".resultados",
+                "#listadoDocumentos",
+                ".resultado",
                 "#resultados",
-                ".documento",
                 "table.resultados",
-                ".list-group-item"
+                ".list-group-item",
+                "article.resultado",
+                ".documento",
+                "div[class*='result']",
+                "div[class*='documento']",
+                "tr[class*='result']",
             ]
 
             content_loaded = False
             for selector in result_selectors:
                 try:
-                    await page.wait_for_selector(selector, timeout=10000)
-                    content_loaded = True
-                    logger.info(f"Resultados encontrados con selector: {selector}")
-                    break
+                    locator = page.locator(selector)
+                    count = await locator.count()
+                    if count > 0:
+                        content_loaded = True
+                        logger.info(f"Resultados encontrados con selector: {selector} ({count} elementos)")
+                        break
                 except Exception:
                     continue
 
             if not content_loaded:
-                # Esperar un poco más y obtener el contenido de todas formas
-                await asyncio.sleep(5)
-                logger.warning("No se encontró selector de resultados específico, extrayendo contenido")
+                logger.warning("No se encontró selector de resultados específico")
+                # Guardar screenshot de debug
+                try:
+                    await page.screenshot(path="/tmp/cendoj_no_results.png", full_page=True)
+                    logger.info("Screenshot guardado en /tmp/cendoj_no_results.png")
+                except:
+                    pass
 
             # Obtener el HTML de la página
             html = await page.content()
+
+            # Log para debug: buscar patrones conocidos
+            if "ECLI:" in html:
+                logger.info("Encontrado patrón ECLI en HTML")
+            if "STS" in html or "SAP" in html or "STSJ" in html:
+                logger.info("Encontrados identificadores de sentencias en HTML")
+            if "No se han encontrado" in html or "sin resultados" in html.lower():
+                logger.info("Página indica que no hay resultados")
 
             # Parsear resultados
             results = self._parse_search_results(html)
