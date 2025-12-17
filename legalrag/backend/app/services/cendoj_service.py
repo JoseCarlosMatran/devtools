@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.models.jurisprudencia import Jurisprudencia, Jurisdiccion, TipoTribunal
-from app.services.rag_service import RAGService
+
+# Import opcional de RAGService (requiere sentence_transformers)
+try:
+    from app.services.rag_service import RAGService
+except ImportError:
+    RAGService = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +123,11 @@ class CendojService:
                     "Ejecuta: pip install playwright && playwright install chromium"
                 )
 
-    async def _get_rag_service(self) -> RAGService:
+    async def _get_rag_service(self) -> Optional["RAGService"]:
         """Obtiene servicio RAG."""
+        if RAGService is None:
+            logger.warning("RAGService no disponible - sentence_transformers no instalado")
+            return None
         if self._rag_service is None:
             self._rag_service = RAGService()
         return self._rag_service
