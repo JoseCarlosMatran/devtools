@@ -90,7 +90,7 @@ class CendojService:
 
     # Headers para identificarnos correctamente
     HEADERS = {
-        "User-Agent": "LegalRAG/1.0 (Investigación jurídica académica; contacto@legalrag.es)",
+        "User-Agent": "LegalRAG/1.0 (Legal research; contacto@legalrag.es)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "es-ES,es;q=0.9",
         "Accept-Encoding": "gzip, deflate",
