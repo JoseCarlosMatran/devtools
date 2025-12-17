@@ -589,7 +589,7 @@ class CendojService:
 
             # Procesar cada enlace
             processed = 0
-            for i in range(min(link_count, max_documents)):
+            for i in range(min(link_count, max_documents * 2)):  # Try more links in case some fail
                 try:
                     await self._rate_limit()
 
@@ -608,46 +608,66 @@ class CendojService:
 
                     logger.info(f"Haciendo clic en: {link_text[:50]}")
 
-                    # Hacer clic y esperar navegación
-                    await link.click()
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    await asyncio.sleep(2)
+                    # Los enlaces de CENDOJ pueden abrir en nueva pestaña/popup
+                    # Usamos expect_popup para capturar la nueva página
+                    try:
+                        # Intento 1: Manejar como popup/nueva pestaña
+                        async with page.expect_popup(timeout=15000) as popup_info:
+                            await link.click()
 
-                    # Obtener HTML y parsear
-                    html = await page.content()
-                    current_url = page.url
+                        popup_page = await popup_info.value
+                        await popup_page.wait_for_load_state("networkidle", timeout=30000)
+                        await asyncio.sleep(2)
 
-                    sentencia = self._parse_document(html, current_url)
-                    if sentencia:
-                        sentencias.append(sentencia)
-                        logger.info(f"Documento extraído: {sentencia.roj or sentencia.ecli or 'sin identificador'}")
-                        processed += 1
-                    else:
-                        logger.warning(f"No se pudo extraer documento de {current_url}")
+                        html = await popup_page.content()
+                        current_url = popup_page.url
+                        logger.info(f"Popup abierto: {current_url[:80]}")
 
-                    # Volver atrás
-                    await page.go_back()
-                    await page.wait_for_load_state("domcontentloaded", timeout=30000)
-                    await asyncio.sleep(1)
+                        sentencia = self._parse_document(html, current_url)
+                        if sentencia:
+                            sentencias.append(sentencia)
+                            logger.info(f"Documento extraído: {sentencia.roj or sentencia.ecli or 'sin identificador'}")
+                            processed += 1
+                        else:
+                            logger.warning(f"No se pudo extraer documento de {current_url}")
+
+                        # Cerrar el popup
+                        await popup_page.close()
+
+                    except Exception as popup_error:
+                        # Intento 2: Si no hay popup, quizás navega en la misma página
+                        logger.info(f"No se detectó popup, intentando navegación directa: {popup_error}")
+
+                        # Obtener el href y navegar directamente
+                        href = await link.get_attribute("href")
+                        if href:
+                            full_url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
+                            logger.info(f"Navegando directamente a: {full_url[:80]}")
+
+                            # Abrir en nueva página del contexto
+                            doc_page = await self._context.new_page()
+                            try:
+                                await doc_page.goto(full_url, wait_until="networkidle", timeout=30000)
+                                await asyncio.sleep(2)
+
+                                html = await doc_page.content()
+                                current_url = doc_page.url
+
+                                sentencia = self._parse_document(html, current_url)
+                                if sentencia:
+                                    sentencias.append(sentencia)
+                                    logger.info(f"Documento extraído (directo): {sentencia.roj or sentencia.ecli or 'sin identificador'}")
+                                    processed += 1
+                                else:
+                                    logger.warning(f"No se pudo extraer documento de {current_url}")
+                            finally:
+                                await doc_page.close()
 
                     if processed >= max_documents:
                         break
 
                 except Exception as e:
                     logger.error(f"Error procesando enlace {i}: {e}")
-                    # Intentar volver a la página principal si nos perdimos
-                    try:
-                        await page.goto(main_url, wait_until="domcontentloaded", timeout=30000)
-                        await asyncio.sleep(2)
-                        # Cerrar modal si aparece
-                        try:
-                            close_btn = page.locator("button.close").first
-                            if await close_btn.count() > 0:
-                                await close_btn.click()
-                        except:
-                            pass
-                    except:
-                        pass
                     continue
 
             logger.info(f"Total documentos extraídos: {len(sentencias)}")
