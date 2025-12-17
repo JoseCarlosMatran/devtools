@@ -542,20 +542,26 @@ class CendojService:
         """Parsea el documento completo de una sentencia."""
         soup = BeautifulSoup(html, "html.parser")
 
-        # Detectar páginas de error
-        error_indicators = [
-            "algo ha fallado",
-            "Lo sentimos",
-            "error",
-            "no encontrado",
-            "no disponible",
-            "vuelva a intentarlo"
-        ]
-
+        # Detectar páginas de error - buscar en todo el texto
         page_text = soup.get_text().lower()
-        for indicator in error_indicators:
-            if indicator.lower() in page_text and len(page_text) < 5000:
-                logger.warning(f"Página de error detectada para {url}")
+
+        # Si contiene mensajes de error, es una página de error
+        if "algo ha fallado" in page_text or "vuelva a intentarlo" in page_text:
+            logger.warning(f"Página de error detectada para {url}")
+            return None
+
+        # Si contiene el header de navegación de CENDOJ pero no contenido real de sentencia
+        if "centro de documentación judicial" in page_text and "buscador" in page_text:
+            # Verificar si hay contenido real de sentencia
+            has_real_content = any(ind in page_text for ind in [
+                "fundamentos de derecho",
+                "antecedentes de hecho",
+                "hechos probados",
+                "fallamos",
+                "en nombre del rey"
+            ])
+            if not has_real_content:
+                logger.warning(f"Página sin contenido de sentencia para {url}")
                 return None
 
         sentencia = CendojSentencia(url_documento=url)
@@ -585,7 +591,6 @@ class CendojService:
             "#contenido",
             "#documento",
             "article.documento",
-            "main"
         ]
 
         for selector in content_selectors:
@@ -594,25 +599,27 @@ class CendojService:
                 logger.info(f"Contenido encontrado con selector: {selector}")
                 break
 
+        # Si no encontramos contenedor específico, NO usar body completo
+        # porque capturaría todo el header de navegación
         if not contenido:
-            contenido = soup.body
-
-        if not contenido:
+            logger.warning(f"No se encontró contenedor de documento para {url}")
             return None
 
         texto_completo = contenido.get_text("\n", strip=True)
 
         # Verificar que tenemos contenido sustancial (una sentencia real)
-        if len(texto_completo) < 500:
+        if len(texto_completo) < 1000:
             logger.warning(f"Contenido demasiado corto ({len(texto_completo)} chars) para {url}")
             return None
 
         # Verificar que parece una sentencia (tiene algún indicador legal)
-        sentencia_indicators = ["FUNDAMENTOS", "FALLO", "ANTECEDENTES", "HECHOS", "DERECHO", "TRIBUNAL", "SENTENCIA"]
-        has_indicator = any(ind in texto_completo.upper() for ind in sentencia_indicators)
+        texto_upper = texto_completo.upper()
+        sentencia_indicators = ["FUNDAMENTOS", "FALLO", "ANTECEDENTES", "HECHOS PROBADOS", "EN NOMBRE DEL REY", "SENTENCIA"]
+        has_indicator = any(ind in texto_upper for ind in sentencia_indicators)
         if not has_indicator:
             logger.warning(f"No parece ser una sentencia válida: {url}")
             return None
+
         sentencia.texto_completo = texto_completo
 
         # Extraer ROJ del texto
