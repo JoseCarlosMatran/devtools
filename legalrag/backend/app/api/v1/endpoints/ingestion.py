@@ -1,5 +1,5 @@
 """
-Endpoints para ingesta de jurisprudencia desde CENDOJ.
+Endpoints para ingesta de jurisprudencia desde CENDOJ y legislación desde BOE.
 """
 import logging
 from datetime import date
@@ -12,11 +12,12 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.security import get_current_user, require_role
 from app.models.user import User, UserRole
-from app.models.jurisprudencia import Jurisprudencia, Jurisdiccion, TipoTribunal
+from app.models.jurisprudencia import Jurisprudencia, Jurisdiccion, TipoTribunal, Legislacion, TipoLegislacion
 from app.services.cendoj_service import (
     CendojService, CendojSearchParams,
     CendojJurisdiccion, CendojTipoOrgano
 )
+from app.services.boe_service import BOEService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -511,3 +512,275 @@ async def delete_jurisprudencia(
     await db.commit()
 
     return {"message": f"Sentencia {jurisprudencia_id} eliminada"}
+
+
+# ============ Endpoints BOE (Legislación) ============
+
+class BOEIngestionRequest(BaseModel):
+    """Parámetros para ingesta del BOE."""
+    fecha: date
+    max_documentos: int = 20
+    solo_disposiciones: bool = True
+
+
+class BOEIngestionResponse(BaseModel):
+    """Respuesta de ingesta BOE."""
+    encontrados: int
+    guardados: int
+    duplicados: int
+    errores: int
+    message: str
+
+
+class LegislacionStats(BaseModel):
+    """Estadísticas de legislación."""
+    total: int
+    por_tipo: dict
+    vigentes: int
+    no_vigentes: int
+    indexadas: int
+
+
+@router.get("/boe/stats", response_model=LegislacionStats)
+async def get_legislacion_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtiene estadísticas de la legislación indexada.
+    """
+    # Total
+    result = await db.execute(select(func.count(Legislacion.id)))
+    total = result.scalar() or 0
+
+    # Por tipo
+    result = await db.execute(
+        select(Legislacion.tipo, func.count(Legislacion.id))
+        .group_by(Legislacion.tipo)
+    )
+    por_tipo = {row[0].value if row[0] else "otro": row[1] for row in result.all()}
+
+    # Vigentes
+    result = await db.execute(
+        select(func.count(Legislacion.id)).where(Legislacion.vigente == True)
+    )
+    vigentes = result.scalar() or 0
+
+    # Indexadas
+    result = await db.execute(
+        select(func.count(Legislacion.id)).where(Legislacion.indexada == True)
+    )
+    indexadas = result.scalar() or 0
+
+    return LegislacionStats(
+        total=total,
+        por_tipo=por_tipo,
+        vigentes=vigentes,
+        no_vigentes=total - vigentes,
+        indexadas=indexadas
+    )
+
+
+@router.post("/boe/ingest", response_model=BOEIngestionResponse)
+async def ingest_boe(
+    request: BOEIngestionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN_DESPACHO, UserRole.SUPER_ADMIN))
+):
+    """
+    Ingesta legislación del BOE para una fecha específica.
+
+    Descarga todos los documentos publicados en el BOE en la fecha indicada.
+    Por defecto solo descarga disposiciones generales (secciones I, II, III).
+
+    Requiere rol de administrador.
+    """
+    if request.max_documentos > 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Máximo 100 documentos por petición"
+        )
+
+    service = BOEService()
+
+    try:
+        stats = await service.ingest_por_fecha(
+            fecha=request.fecha,
+            db=db,
+            max_documentos=request.max_documentos,
+            index_in_qdrant=True
+        )
+
+        return BOEIngestionResponse(
+            encontrados=stats["encontrados"],
+            guardados=stats["guardados"],
+            duplicados=stats["duplicados"],
+            errores=stats["errores"],
+            message=f"Ingesta BOE completada: {stats['guardados']} documentos guardados"
+        )
+    except Exception as e:
+        logger.error(f"Error en ingesta BOE: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en ingesta BOE: {str(e)}"
+        )
+
+
+@router.get("/boe/preview/{fecha}")
+async def preview_boe(
+    fecha: date,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Preview del sumario del BOE para una fecha.
+    Muestra los documentos disponibles sin descargarlos.
+    """
+    service = BOEService()
+
+    try:
+        sumario = await service.get_sumario(fecha)
+
+        if sumario.get("status", {}).get("code") != "200":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No hay BOE para la fecha {fecha}"
+            )
+
+        # Contar documentos por sección
+        data = sumario.get("data", {}).get("sumario", {})
+        diario = data.get("diario", [])
+
+        resumen = {
+            "fecha": fecha.isoformat(),
+            "secciones": [],
+            "total_documentos": 0
+        }
+
+        for d in diario:
+            for seccion in d.get("seccion", []):
+                num_docs = 0
+                for depto in seccion.get("departamento", []):
+                    for epigrafe in depto.get("epigrafe", []):
+                        items = epigrafe.get("item", [])
+                        if isinstance(items, dict):
+                            num_docs += 1
+                        else:
+                            num_docs += len(items)
+
+                resumen["secciones"].append({
+                    "codigo": seccion.get("codigo"),
+                    "nombre": seccion.get("nombre"),
+                    "documentos": num_docs
+                })
+                resumen["total_documentos"] += num_docs
+
+        return resumen
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error obteniendo preview BOE: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Error conectando con BOE: {str(e)}"
+        )
+    finally:
+        await service.close()
+
+
+@router.get("/boe/documento/{identificador}")
+async def get_documento_boe(
+    identificador: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtiene un documento específico del BOE por su identificador.
+    Primero busca en la base de datos local, si no existe lo descarga.
+    """
+    # Buscar en DB local
+    result = await db.execute(
+        select(Legislacion).where(Legislacion.codigo == identificador)
+    )
+    legislacion = result.scalar_one_or_none()
+
+    if legislacion:
+        return {
+            "source": "local",
+            "documento": {
+                "id": legislacion.id,
+                "codigo": legislacion.codigo,
+                "titulo": legislacion.titulo,
+                "tipo": legislacion.tipo.value if legislacion.tipo else None,
+                "fecha_publicacion": legislacion.fecha_publicacion.isoformat() if legislacion.fecha_publicacion else None,
+                "vigente": legislacion.vigente,
+                "url": legislacion.boe_url,
+                "texto_length": len(legislacion.articulado) if legislacion.articulado else 0,
+                "indexada": legislacion.indexada
+            }
+        }
+
+    # Descargar del BOE
+    service = BOEService()
+    try:
+        doc = await service.fetch_documento(identificador)
+        if not doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Documento {identificador} no encontrado en BOE"
+            )
+
+        return {
+            "source": "boe",
+            "documento": {
+                "identificador": doc.identificador,
+                "titulo": doc.titulo,
+                "tipo": doc.tipo.value if doc.tipo else None,
+                "departamento": doc.departamento,
+                "fecha_publicacion": doc.fecha_publicacion.isoformat() if doc.fecha_publicacion else None,
+                "vigente": doc.vigente,
+                "url_html": doc.url_html,
+                "url_pdf": doc.url_pdf,
+                "texto_length": len(doc.texto_completo) if doc.texto_completo else 0
+            }
+        }
+    finally:
+        await service.close()
+
+
+@router.get("/boe/recent")
+async def get_recent_legislacion(
+    limit: int = 20,
+    tipo: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Obtiene la legislación más reciente indexada.
+    """
+    query = select(Legislacion).order_by(Legislacion.fecha_publicacion.desc())
+
+    if tipo:
+        try:
+            tipo_enum = TipoLegislacion(tipo)
+            query = query.where(Legislacion.tipo == tipo_enum)
+        except ValueError:
+            pass
+
+    query = query.limit(limit)
+    result = await db.execute(query)
+    leyes = result.scalars().all()
+
+    return [
+        {
+            "id": l.id,
+            "codigo": l.codigo,
+            "titulo": l.titulo[:200] + "..." if len(l.titulo) > 200 else l.titulo,
+            "titulo_corto": l.titulo_corto,
+            "tipo": l.tipo.value if l.tipo else None,
+            "fecha_publicacion": l.fecha_publicacion.isoformat() if l.fecha_publicacion else None,
+            "vigente": l.vigente,
+            "indexada": l.indexada
+        }
+        for l in leyes
+    ]
