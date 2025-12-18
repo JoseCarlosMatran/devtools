@@ -61,6 +61,39 @@ class IngestionStatus(BaseModel):
     progress: Optional[dict] = None
 
 
+class JurisprudenciaManualCreate(BaseModel):
+    """Datos para crear jurisprudencia manualmente."""
+    ecli: Optional[str] = None
+    roj: Optional[str] = None
+    tribunal: str
+    tipo_tribunal: str  # tribunal_supremo, audiencia_nacional, tsj, audiencia_provincial, etc.
+    sede: Optional[str] = None
+    seccion: Optional[str] = None
+    tipo_resolucion: str = "Sentencia"
+    numero_resolucion: Optional[str] = None
+    fecha_resolucion: date
+    ponente: Optional[str] = None
+    jurisdiccion: str  # civil, penal, social, contencioso_administrativo, mercantil, militar
+    materia: Optional[str] = None
+    voces: Optional[str] = None  # Descriptores separados por ;
+    cabecera: Optional[str] = None
+    antecedentes: Optional[str] = None
+    fundamentos_derecho: str
+    fallo: Optional[str] = None
+    texto_completo: str
+
+
+class JurisprudenciaManualResponse(BaseModel):
+    """Respuesta de creación manual."""
+    id: int
+    ecli: Optional[str]
+    roj: Optional[str]
+    tribunal: str
+    fecha_resolucion: str
+    indexada: bool
+    message: str
+
+
 # ============ Estado global para tareas en background ============
 _ingestion_tasks = {}
 
@@ -470,6 +503,131 @@ async def get_recent_jurisprudencia(
         }
         for s in sentencias
     ]
+
+
+@router.post("/manual", response_model=JurisprudenciaManualResponse)
+async def create_jurisprudencia_manual(
+    data: JurisprudenciaManualCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN_DESPACHO, UserRole.SUPER_ADMIN))
+):
+    """
+    Crea una sentencia manualmente.
+
+    Útil para cargar sentencias de ejemplo o importar desde fuentes externas.
+    Indexa automáticamente en Qdrant si está disponible.
+
+    Requiere rol de administrador.
+    """
+    # Validar tipo_tribunal
+    try:
+        tipo_tribunal_enum = TipoTribunal(data.tipo_tribunal)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"tipo_tribunal inválido. Valores: {[t.value for t in TipoTribunal]}"
+        )
+
+    # Validar jurisdicción
+    try:
+        jurisdiccion_enum = Jurisdiccion(data.jurisdiccion)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"jurisdiccion inválida. Valores: {[j.value for j in Jurisdiccion]}"
+        )
+
+    # Verificar duplicados por ECLI o ROJ
+    if data.ecli:
+        result = await db.execute(
+            select(Jurisprudencia).where(Jurisprudencia.ecli == data.ecli)
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Ya existe una sentencia con ECLI {data.ecli}"
+            )
+
+    if data.roj:
+        result = await db.execute(
+            select(Jurisprudencia).where(Jurisprudencia.roj == data.roj)
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Ya existe una sentencia con ROJ {data.roj}"
+            )
+
+    # Crear sentencia
+    sentencia = Jurisprudencia(
+        ecli=data.ecli,
+        roj=data.roj,
+        tribunal=data.tribunal,
+        tipo_tribunal=tipo_tribunal_enum,
+        sede=data.sede,
+        seccion=data.seccion,
+        tipo_resolucion=data.tipo_resolucion,
+        numero_resolucion=data.numero_resolucion,
+        fecha_resolucion=data.fecha_resolucion,
+        ponente=data.ponente,
+        jurisdiccion=jurisdiccion_enum,
+        materia=data.materia,
+        voces=data.voces,
+        cabecera=data.cabecera,
+        antecedentes=data.antecedentes,
+        fundamentos_derecho=data.fundamentos_derecho,
+        fallo=data.fallo,
+        texto_completo=data.texto_completo,
+        fuente="manual",
+        indexada=False
+    )
+
+    db.add(sentencia)
+    await db.flush()
+
+    # Indexar en Qdrant
+    indexada = False
+    try:
+        from app.services.rag_service import RAGService
+        rag_service = RAGService()
+
+        metadata = {
+            "ecli": sentencia.ecli,
+            "roj": sentencia.roj,
+            "tribunal": sentencia.tribunal,
+            "tipo_tribunal": sentencia.tipo_tribunal.value,
+            "jurisdiccion": sentencia.jurisdiccion.value,
+            "fecha_resolucion": sentencia.fecha_resolucion.isoformat(),
+            "tipo_documento": "jurisprudencia"
+        }
+
+        qdrant_id = await rag_service.index_documento(
+            documento_id=sentencia.id,
+            texto=sentencia.texto_completo,
+            metadata=metadata,
+            collection="jurisprudencia"
+        )
+
+        if qdrant_id:
+            sentencia.qdrant_id = qdrant_id if isinstance(qdrant_id, str) else ",".join(qdrant_id)
+            sentencia.indexada = True
+            indexada = True
+
+    except Exception as e:
+        logger.warning(f"No se pudo indexar en Qdrant: {e}")
+
+    await db.commit()
+    await db.refresh(sentencia)
+
+    return JurisprudenciaManualResponse(
+        id=sentencia.id,
+        ecli=sentencia.ecli,
+        roj=sentencia.roj,
+        tribunal=sentencia.tribunal,
+        fecha_resolucion=sentencia.fecha_resolucion.isoformat(),
+        indexada=indexada,
+        message=f"Sentencia creada correctamente" + (" e indexada en Qdrant" if indexada else "")
+    )
 
 
 @router.delete("/{jurisprudencia_id}")
