@@ -458,7 +458,7 @@ class RAGService:
                 stats[collection_name] = {
                     "points_count": info.points_count,
                     "vectors_count": info.vectors_count,
-                    "status": info.status
+                    "status": str(info.status) if info.status else "unknown"
                 }
             except Exception as e:
                 stats[collection_name] = {"error": str(e)}
