@@ -556,7 +556,7 @@ class CendojService:
     ) -> List[CendojSentencia]:
         """
         Descarga documentos navegando por clics dentro de la misma sesión.
-        Esto evita la protección anti-scraping de CENDOJ.
+        Usa event listeners para capturar nuevas páginas que se abren.
 
         Args:
             max_documents: Máximo de documentos a descargar
@@ -569,6 +569,14 @@ class CendojService:
 
         page = await self._context.new_page()
         sentencias = []
+        new_pages = []  # Cola para páginas nuevas
+
+        # Event listener para capturar nuevas páginas
+        def on_new_page(new_page):
+            logger.info(f"Nueva página detectada: {new_page.url[:80] if new_page.url else 'about:blank'}")
+            new_pages.append(new_page)
+
+        self._context.on("page", on_new_page)
 
         try:
             # Navegar a CENDOJ
@@ -597,82 +605,106 @@ class CendojService:
 
             # Procesar cada enlace
             processed = 0
-            for i in range(min(link_count, max_documents * 2)):  # Try more links in case some fail
+            for i in range(min(link_count, max_documents * 2)):
+                if processed >= max_documents:
+                    break
+
                 try:
                     await self._rate_limit()
 
-                    # Re-obtener los enlaces (pueden haber cambiado después de navegar)
+                    # Re-obtener los enlaces
                     doc_links = page.locator("a[href*='openDocument']")
-
                     if i >= await doc_links.count():
                         break
 
                     link = doc_links.nth(i)
                     link_text = await link.inner_text()
 
-                    # Filtrar solo enlaces que parecen sentencias
+                    # Filtrar solo sentencias
                     if not any(x in link_text for x in ["STS", "SAP", "STSJ", "SAN", "ATS"]):
                         continue
 
-                    logger.info(f"Haciendo clic en: {link_text[:50]}")
+                    logger.info(f"Procesando enlace {i+1}: {link_text[:50]}")
 
-                    # Los enlaces de CENDOJ pueden abrir en nueva pestaña/popup
-                    # Usamos expect_popup para capturar la nueva página
-                    try:
-                        # Intento 1: Manejar como popup/nueva pestaña
-                        async with page.expect_popup(timeout=15000) as popup_info:
+                    # Limpiar cola de páginas nuevas
+                    new_pages.clear()
+
+                    # Obtener el ID del enlace para ejecutar JavaScript
+                    link_id = await link.get_attribute("id")
+                    data_ref = await link.get_attribute("data-ref")
+
+                    if link_id or data_ref:
+                        # Ejecutar el JavaScript de CENDOJ directamente
+                        js_code = f"""
+                        (function() {{
+                            var link = document.getElementById('{link_id}') ||
+                                       document.querySelector('[data-ref="{data_ref}"]');
+                            if (link) {{
+                                // Simular el onclick de CENDOJ
+                                if (typeof markOpenedDoc === 'function') {{
+                                    markOpenedDoc($(link));
+                                }}
+                                if (typeof openDocumentFromHref === 'function') {{
+                                    openDocumentFromHref(link);
+                                    return true;
+                                }}
+                            }}
+                            return false;
+                        }})();
+                        """
+                        try:
+                            result = await page.evaluate(js_code)
+                            logger.info(f"JavaScript ejecutado, resultado: {result}")
+                            await asyncio.sleep(3)  # Esperar a que se abra la nueva pestaña
+                        except Exception as js_error:
+                            logger.warning(f"Error ejecutando JavaScript: {js_error}")
+
+                    # Si no funcionó el JS, intentar clic con modificador
+                    if not new_pages:
+                        try:
+                            # Clic con Ctrl para forzar nueva pestaña
+                            await link.click(modifiers=["Control"])
+                            await asyncio.sleep(2)
+                        except:
+                            pass
+
+                    # Si aún no hay nueva página, clic normal
+                    if not new_pages:
+                        try:
                             await link.click()
+                            await asyncio.sleep(2)
+                        except:
+                            pass
 
-                        popup_page = await popup_info.value
-                        await popup_page.wait_for_load_state("networkidle", timeout=30000)
-                        await asyncio.sleep(2)
+                    # Procesar páginas nuevas capturadas
+                    for new_page in new_pages:
+                        try:
+                            await new_page.wait_for_load_state("networkidle", timeout=30000)
+                            await asyncio.sleep(1)
 
-                        html = await popup_page.content()
-                        current_url = popup_page.url
-                        logger.info(f"Popup abierto: {current_url[:80]}")
+                            current_url = new_page.url
+                            logger.info(f"Procesando página: {current_url[:80]}")
 
-                        sentencia = self._parse_document(html, current_url)
-                        if sentencia:
-                            sentencias.append(sentencia)
-                            logger.info(f"Documento extraído: {sentencia.roj or sentencia.ecli or 'sin identificador'}")
-                            processed += 1
-                        else:
-                            logger.warning(f"No se pudo extraer documento de {current_url}")
+                            html = await new_page.content()
+                            sentencia = self._parse_document(html, current_url)
 
-                        # Cerrar el popup
-                        await popup_page.close()
+                            if sentencia:
+                                sentencias.append(sentencia)
+                                logger.info(f"✓ Documento extraído: {sentencia.roj or sentencia.ecli or 'sin id'}")
+                                processed += 1
+                            else:
+                                logger.warning(f"✗ No se pudo extraer documento")
 
-                    except Exception as popup_error:
-                        # Intento 2: Si no hay popup, quizás navega en la misma página
-                        logger.info(f"No se detectó popup, intentando navegación directa: {popup_error}")
+                            await new_page.close()
 
-                        # Obtener el href y navegar directamente
-                        href = await link.get_attribute("href")
-                        if href:
-                            full_url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
-                            logger.info(f"Navegando directamente a: {full_url[:80]}")
-
-                            # Abrir en nueva página del contexto
-                            doc_page = await self._context.new_page()
+                        except Exception as page_error:
+                            logger.error(f"Error procesando nueva página: {page_error}")
                             try:
-                                await doc_page.goto(full_url, wait_until="networkidle", timeout=30000)
-                                await asyncio.sleep(2)
+                                await new_page.close()
+                            except:
+                                pass
 
-                                html = await doc_page.content()
-                                current_url = doc_page.url
-
-                                sentencia = self._parse_document(html, current_url)
-                                if sentencia:
-                                    sentencias.append(sentencia)
-                                    logger.info(f"Documento extraído (directo): {sentencia.roj or sentencia.ecli or 'sin identificador'}")
-                                    processed += 1
-                                else:
-                                    logger.warning(f"No se pudo extraer documento de {current_url}")
-                            finally:
-                                await doc_page.close()
-
-                    if processed >= max_documents:
-                        break
+                    new_pages.clear()
 
                 except Exception as e:
                     logger.error(f"Error procesando enlace {i}: {e}")
@@ -685,6 +717,11 @@ class CendojService:
             raise
 
         finally:
+            # Remover el event listener
+            try:
+                self._context.remove_listener("page", on_new_page)
+            except:
+                pass
             await page.close()
 
         return sentencias
