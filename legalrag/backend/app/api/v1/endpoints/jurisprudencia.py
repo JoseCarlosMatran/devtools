@@ -153,6 +153,43 @@ async def list_jurisprudencia(
     return [JurisprudenciaResponse.model_validate(j) for j in items]
 
 
+@router.get("/stats")
+async def get_jurisprudencia_stats(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Estadísticas del sistema de jurisprudencia.
+    """
+    from sqlalchemy import func
+
+    # Contar jurisprudencia
+    jur_count = await db.execute(select(func.count(Jurisprudencia.id)))
+    jur_indexed = await db.execute(
+        select(func.count(Jurisprudencia.id)).where(Jurisprudencia.indexada == True)
+    )
+
+    # Contar legislación
+    leg_count = await db.execute(select(func.count(Legislacion.id)))
+    leg_indexed = await db.execute(
+        select(func.count(Legislacion.id)).where(Legislacion.indexada == True)
+    )
+
+    # Stats de Qdrant
+    qdrant_stats = rag_service.get_collection_stats()
+
+    return {
+        "jurisprudencia": {
+            "total": jur_count.scalar(),
+            "indexadas": jur_indexed.scalar()
+        },
+        "legislacion": {
+            "total": leg_count.scalar(),
+            "indexadas": leg_indexed.scalar()
+        },
+        "vectores": qdrant_stats
+    }
+
+
 @router.get("/{jur_id}", response_model=JurisprudenciaFull)
 async def get_jurisprudencia(
     jur_id: int,
@@ -419,40 +456,3 @@ async def list_legislacion(
     items = result.scalars().all()
 
     return [LegislacionResponse.model_validate(l) for l in items]
-
-
-@router.get("/stats")
-async def get_jurisprudencia_stats(
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Estadísticas del sistema de jurisprudencia.
-    """
-    from sqlalchemy import func
-
-    # Contar jurisprudencia
-    jur_count = await db.execute(select(func.count(Jurisprudencia.id)))
-    jur_indexed = await db.execute(
-        select(func.count(Jurisprudencia.id)).where(Jurisprudencia.indexada == True)
-    )
-
-    # Contar legislación
-    leg_count = await db.execute(select(func.count(Legislacion.id)))
-    leg_indexed = await db.execute(
-        select(func.count(Legislacion.id)).where(Legislacion.indexada == True)
-    )
-
-    # Stats de Qdrant
-    qdrant_stats = rag_service.get_collection_stats()
-
-    return {
-        "jurisprudencia": {
-            "total": jur_count.scalar(),
-            "indexadas": jur_indexed.scalar()
-        },
-        "legislacion": {
-            "total": leg_count.scalar(),
-            "indexadas": leg_indexed.scalar()
-        },
-        "vectores": qdrant_stats
-    }
