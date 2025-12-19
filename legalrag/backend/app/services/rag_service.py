@@ -3,6 +3,7 @@ Servicio RAG - Retrieval Augmented Generation para jurisprudencia.
 Motor de búsqueda semántica y recuperación de documentos legales.
 """
 import logging
+import uuid
 from typing import List, Optional, Dict, Any
 from datetime import date
 import asyncio
@@ -186,7 +187,8 @@ class RAGService:
         points = []
         point_ids = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            point_id = f"jur_{jurisprudencia_id}_{i}"
+            # Usar UUID para compatibilidad con Qdrant local/memory
+            point_id = str(uuid.uuid4())
             point_ids.append(point_id)
             points.append(PointStruct(
                 id=point_id,
@@ -196,6 +198,7 @@ class RAGService:
                     "fuente_id": jurisprudencia_id,
                     "chunk_index": i,
                     "texto": chunk,
+                    "point_ref": f"jur_{jurisprudencia_id}_{i}",
                     **metadata
                 }
             ))
@@ -225,7 +228,7 @@ class RAGService:
         points = []
         point_ids = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            point_id = f"doc_{documento_id}_{i}"
+            point_id = str(uuid.uuid4())
             point_ids.append(point_id)
             points.append(PointStruct(
                 id=point_id,
@@ -236,6 +239,7 @@ class RAGService:
                     "caso_id": caso_id,
                     "chunk_index": i,
                     "texto": chunk,
+                    "point_ref": f"doc_{documento_id}_{i}",
                     **metadata
                 }
             ))
@@ -264,7 +268,7 @@ class RAGService:
         points = []
         point_ids = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            point_id = f"leg_{legislacion_id}_{i}"
+            point_id = str(uuid.uuid4())
             point_ids.append(point_id)
             points.append(PointStruct(
                 id=point_id,
@@ -274,6 +278,7 @@ class RAGService:
                     "fuente_id": legislacion_id,
                     "chunk_index": i,
                     "texto": chunk,
+                    "point_ref": f"leg_{legislacion_id}_{i}",
                     **metadata
                 }
             ))
@@ -337,13 +342,13 @@ class RAGService:
 
         search_filter = models.Filter(must=must_conditions) if must_conditions else None
 
-        results = self.qdrant.search(
+        results = self.qdrant.query_points(
             collection_name=settings.qdrant_collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
             query_filter=search_filter,
             limit=limit * 2,  # Más para deduplicar por fuente
             with_payload=True
-        )
+        ).points
 
         # Deduplicar por fuente y agregar chunks del mismo documento
         seen_sources = {}
@@ -392,12 +397,12 @@ class RAGService:
 
         # Búsqueda en jurisprudencia
         if include_jurisprudencia:
-            jur_results = self.qdrant.search(
+            jur_results = self.qdrant.query_points(
                 collection_name=settings.qdrant_collection_name,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=limit,
                 with_payload=True
-            )
+            ).points
             results["jurisprudencia"] = [
                 {
                     "id": r.payload.get("fuente_id"),
@@ -410,12 +415,12 @@ class RAGService:
 
         # Búsqueda en legislación
         if include_legislacion:
-            leg_results = self.qdrant.search(
+            leg_results = self.qdrant.query_points(
                 collection_name="legislacion",
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=limit // 2,
                 with_payload=True
-            )
+            ).points
             results["legislacion"] = [
                 {
                     "id": r.payload.get("fuente_id"),
@@ -436,13 +441,13 @@ class RAGService:
                     )
                 ]
             )
-            doc_results = self.qdrant.search(
+            doc_results = self.qdrant.query_points(
                 collection_name="documentos_casos",
-                query_vector=query_embedding,
+                query=query_embedding,
                 query_filter=doc_filter,
                 limit=limit,
                 with_payload=True
-            )
+            ).points
             results["documentos_caso"] = [
                 {
                     "id": r.payload.get("documento_id"),

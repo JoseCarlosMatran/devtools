@@ -215,7 +215,7 @@ async def get_jurisprudencia(
 @router.post("/search", response_model=RAGResponse)
 async def search_jurisprudencia(
     query: RAGQuery,
-    current_user: User = Depends(get_current_active_user)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Búsqueda semántica de jurisprudencia.

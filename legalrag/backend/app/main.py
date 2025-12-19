@@ -40,6 +40,38 @@ async def lifespan(app: FastAPI):
         rag_service = RAGService()
         await rag_service.init_collection()
         logger.info("✅ Colección Qdrant inicializada")
+
+        # Si está en modo memoria, indexar sentencias existentes automáticamente
+        if rag_service._using_local:
+            from app.core.database import AsyncSessionLocal
+            from sqlalchemy import select, update
+            from app.models.jurisprudencia import Jurisprudencia
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Jurisprudencia).where(Jurisprudencia.indexada == False)
+                )
+                sentencias = result.scalars().all()
+
+                if sentencias:
+                    logger.info(f"📚 Indexando {len(sentencias)} sentencias en Qdrant...")
+                    for jur in sentencias:
+                        try:
+                            texto = f"{jur.cabecera or ''} {jur.fundamentos_derecho or ''} {jur.fallo or ''}"
+                            if len(texto.strip()) < 500 and jur.texto_completo:
+                                texto = jur.texto_completo
+                            metadata = {
+                                "id": jur.id, "ecli": jur.ecli or "", "roj": jur.roj or "",
+                                "tribunal": jur.tribunal or "", "materia": jur.materia or ""
+                            }
+                            await rag_service.index_jurisprudencia(jur.id, texto, metadata)
+                            await db.execute(
+                                update(Jurisprudencia).where(Jurisprudencia.id == jur.id).values(indexada=True)
+                            )
+                        except Exception as e:
+                            logger.error(f"Error indexando {jur.roj}: {e}")
+                    await db.commit()
+                    logger.info("✅ Sentencias indexadas")
     except Exception as e:
         logger.warning(f"⚠️ Qdrant no disponible: {e}. Continuando sin RAG.")
 
