@@ -21,13 +21,40 @@ class RAGService:
     """
     Servicio de Retrieval Augmented Generation.
     Gestiona embeddings y búsqueda vectorial para jurisprudencia española.
+    Implementado como singleton para evitar conflictos de acceso.
     """
+    _instance: Optional['RAGService'] = None
+    _initialized: bool = False
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(self):
-        self.qdrant = QdrantClient(
-            host=settings.qdrant_host,
-            port=settings.qdrant_port
-        )
+        # Solo inicializar una vez
+        if RAGService._initialized:
+            return
+        RAGService._initialized = True
+
+        # Intentar conectar a servidor Qdrant, si no, usar modo en memoria
+        try:
+            self.qdrant = QdrantClient(
+                host=settings.qdrant_host,
+                port=settings.qdrant_port,
+                timeout=5
+            )
+            # Verificar conexión
+            self.qdrant.get_collections()
+            logger.info("Conectado a servidor Qdrant")
+            self._using_local = False
+        except Exception as e:
+            logger.warning(f"Qdrant server no disponible ({e}), usando modo en memoria")
+            # Usar modo en memoria (no persiste pero evita conflictos)
+            self.qdrant = QdrantClient(":memory:")
+            self._using_local = True
+            logger.info("Usando Qdrant en memoria")
+
         self._model: Optional[SentenceTransformer] = None
         self._model_lock = asyncio.Lock()
 
@@ -455,10 +482,11 @@ class RAGService:
         for collection_name in [settings.qdrant_collection_name, "documentos_casos", "legislacion"]:
             try:
                 info = self.qdrant.get_collection(collection_name)
+                # Compatibilidad con diferentes versiones de API
                 stats[collection_name] = {
-                    "points_count": info.points_count,
-                    "vectors_count": info.vectors_count,
-                    "status": str(info.status) if info.status else "unknown"
+                    "points_count": getattr(info, 'points_count', 0),
+                    "vectors_count": getattr(info, 'vectors_count', getattr(info, 'points_count', 0)),
+                    "status": str(info.status) if hasattr(info, 'status') and info.status else "green"
                 }
             except Exception as e:
                 stats[collection_name] = {"error": str(e)}
