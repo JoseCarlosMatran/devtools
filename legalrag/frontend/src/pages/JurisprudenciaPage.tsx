@@ -5,6 +5,9 @@ import {
   MagnifyingGlassIcon,
   BookOpenIcon,
   PlusIcon,
+  XMarkIcon,
+  DocumentTextIcon,
+  ScaleIcon,
 } from '@heroicons/react/24/outline'
 import { jurisprudenciaApi } from '../services/api'
 import { format } from 'date-fns'
@@ -19,10 +22,53 @@ interface SearchResult {
   metadatos: Record<string, unknown>
 }
 
+interface Jurisprudencia {
+  id: number
+  roj?: string
+  ecli?: string
+  tribunal: string
+  sede?: string
+  seccion?: string
+  tipo_resolucion: string
+  numero_resolucion?: string
+  fecha_resolucion: string
+  ponente?: string
+  jurisdiccion: string
+  materia?: string
+  voces?: string
+  cabecera?: string
+  fundamentos_derecho?: string
+  fallo?: string
+  texto_completo?: string
+  indexada: boolean
+}
+
 export default function JurisprudenciaPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [isSearching, setIsSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedJur, setSelectedJur] = useState<Jurisprudencia | null>(null)
+  const [loadingDetail, setLoadingDetail] = useState(false)
+
+  const openDetail = async (id: number) => {
+    setSelectedId(id)
+    setLoadingDetail(true)
+    try {
+      const data = await jurisprudenciaApi.get(id)
+      setSelectedJur(data)
+    } catch {
+      toast.error('Error al cargar los detalles')
+      setSelectedId(null)
+    } finally {
+      setLoadingDetail(false)
+    }
+  }
+
+  const closeDetail = () => {
+    setSelectedId(null)
+    setSelectedJur(null)
+  }
 
   const { data: stats } = useQuery({
     queryKey: ['jurisprudencia-stats'],
@@ -129,7 +175,8 @@ export default function JurisprudenciaPage() {
             {searchResults.map((result, i) => (
               <div
                 key={i}
-                className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                onClick={() => openDetail(result.id)}
+                className="border border-gray-200 rounded-lg p-4 hover:bg-primary-50 hover:border-primary-300 transition-colors cursor-pointer"
               >
                 <div className="flex items-start justify-between mb-2">
                   <div>
@@ -138,6 +185,9 @@ export default function JurisprudenciaPage() {
                       Relevancia: {(result.score * 100).toFixed(1)}%
                     </p>
                   </div>
+                  <span className="text-xs text-primary-600 font-medium">
+                    Click para ver →
+                  </span>
                 </div>
                 <p className="text-sm text-gray-600 line-clamp-3">{result.extracto}</p>
               </div>
@@ -174,7 +224,11 @@ export default function JurisprudenciaPage() {
               jurisdiccion: string
               indexada: boolean
             }) => (
-              <li key={jur.id} className="py-3">
+              <li
+                key={jur.id}
+                onClick={() => openDetail(jur.id)}
+                className="py-3 px-2 -mx-2 rounded-lg hover:bg-primary-50 cursor-pointer transition-colors"
+              >
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="font-medium text-gray-900">
@@ -211,6 +265,130 @@ export default function JurisprudenciaPage() {
           Nota: El scraping automático de CENDOJ no está permitido. Las sentencias deben cargarse manualmente.
         </p>
       </div>
+
+      {/* Modal de detalle */}
+      {selectedId !== null && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b bg-primary-50">
+              <div className="flex items-center gap-3">
+                <ScaleIcon className="h-6 w-6 text-primary-600" />
+                <div>
+                  <h2 className="font-bold text-gray-900">
+                    {loadingDetail ? 'Cargando...' : (selectedJur?.roj || selectedJur?.ecli || 'Sentencia')}
+                  </h2>
+                  {selectedJur && (
+                    <p className="text-sm text-gray-600">
+                      {selectedJur.tribunal} · {format(new Date(selectedJur.fecha_resolucion), 'd MMMM yyyy', { locale: es })}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={closeDetail}
+                className="p-2 hover:bg-gray-200 rounded-lg transition-colors"
+              >
+                <XMarkIcon className="h-5 w-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {loadingDetail ? (
+                <div className="text-center py-12">
+                  <div className="animate-spin h-8 w-8 border-4 border-primary-500 border-t-transparent rounded-full mx-auto mb-4" />
+                  <p className="text-gray-500">Cargando detalles...</p>
+                </div>
+              ) : selectedJur ? (
+                <>
+                  {/* Metadatos */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <p className="text-gray-500">Tipo</p>
+                      <p className="font-medium">{selectedJur.tipo_resolucion}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500">Número</p>
+                      <p className="font-medium">{selectedJur.numero_resolucion || '-'}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500">Jurisdicción</p>
+                      <p className="font-medium capitalize">{selectedJur.jurisdiccion}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500">Ponente</p>
+                      <p className="font-medium">{selectedJur.ponente || '-'}</p>
+                    </div>
+                  </div>
+
+                  {/* Materia */}
+                  {selectedJur.materia && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                        <DocumentTextIcon className="h-5 w-5 text-primary-600" />
+                        Materia
+                      </h3>
+                      <p className="text-gray-700 bg-gray-50 p-3 rounded-lg">{selectedJur.materia}</p>
+                    </div>
+                  )}
+
+                  {/* Voces */}
+                  {selectedJur.voces && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-2">Voces</h3>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedJur.voces.split(';').map((voz, i) => (
+                          <span key={i} className="px-2 py-1 bg-primary-100 text-primary-700 text-xs rounded-full">
+                            {voz.trim()}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Cabecera */}
+                  {selectedJur.cabecera && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-2">Resumen</h3>
+                      <p className="text-gray-700 bg-yellow-50 p-4 rounded-lg border-l-4 border-yellow-400">
+                        {selectedJur.cabecera}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Fundamentos */}
+                  {selectedJur.fundamentos_derecho && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-2">Fundamentos de Derecho</h3>
+                      <div className="text-gray-700 bg-gray-50 p-4 rounded-lg whitespace-pre-wrap text-sm max-h-64 overflow-y-auto">
+                        {selectedJur.fundamentos_derecho}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Fallo */}
+                  {selectedJur.fallo && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-2">Fallo</h3>
+                      <div className="text-gray-700 bg-green-50 p-4 rounded-lg border-l-4 border-green-500 whitespace-pre-wrap text-sm">
+                        {selectedJur.fallo}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t bg-gray-50 flex justify-end gap-3">
+              <button onClick={closeDetail} className="btn-secondary">
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
